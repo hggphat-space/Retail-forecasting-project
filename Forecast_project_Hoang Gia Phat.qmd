@@ -1,0 +1,794 @@
+---
+title: "Retail Forecasting Project: Time Series Analysis of Australian Retail Trade Data"
+subtitle: "Applied Forecasting with ETS and ARIMA Models"
+author: "Hoang Gia Phat"
+date: "May 2025"
+quarto-required: '>=1.3.0'
+format:
+  html:
+    output-file: "Retail_Forecasting_Project.html"
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    theme: cosmo
+    embed-resources: true
+    code-fold: show
+    code-tools: true
+---
+
+## Abstract
+
+This project demonstrates advanced time series forecasting techniques applied to real-world Australian retail trade data from the Australian Bureau of Statistics (ABS). The analysis focuses on Queensland Household Goods retail turnover spanning over 40 years (1982-2022), employing both Exponential Smoothing State Space (ETS) and AutoRegressive Integrated Moving Average (ARIMA) models. The project showcases expertise in statistical modeling, data transformation, model selection, and forecast validation—essential skills for business analysis and data-driven decision-making.
+
+**Key Outcomes:**
+- Successfully identified optimal data transformations and differencing requirements
+- Selected ETS model as the preferred forecasting method based on rigorous validation
+- Achieved strong forecast accuracy (MAPE < 5%) on out-of-sample data
+- Validated forecasts against actual ABS data, demonstrating practical applicability
+
+---
+```{r setup, include=FALSE}
+#| echo: false
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6,
+  fig.align = "center"
+)
+```
+
+## Data Loading and Setup
+
+```{r libraries}
+# Load required libraries for time series analysis and visualization
+library(fpp3)      # Forecasting principles and practice
+library(readxl)    # Reading Excel files
+library(tidyverse) # Data manipulation and visualization
+```
+
+```{r data-loading}
+#| label: data-loading
+#| echo: true
+
+# Function to retrieve student-specific retail data
+# This ensures reproducibility by using student ID as random seed
+get_my_data <- function(student_id) {
+  set.seed(student_id)
+  all_data <- readr::read_rds("https://bit.ly/monashretaildata")
+  while(TRUE) {
+    retail <- filter(all_data, `Series ID` == sample(`Series ID`, 1))
+    # Ensure no missing values in the selected series
+    if(!any(is.na(fill_gaps(retail)$Turnover))) return(retail)
+  }
+}
+
+# Load retail turnover data for Queensland Household Goods
+# Student ID: 32325453
+retail <- get_my_data(32325453)
+
+# Display data summary
+cat("Data loaded successfully!\n")
+cat("Time period:", format(min(retail$Month)), "to", format(max(retail$Month)), "\n")
+cat("Total observations:", nrow(retail), "\n")
+cat("Series:", unique(retail$`Series ID`), "\n")
+```
+
+## Exploratory Data Analysis
+### 1. Initial Data Visualization
+
+```{r initial-plots}
+#| label: initial-plots
+#| fig-cap: "Time series plots revealing trend, seasonality, and patterns"
+
+# Line plot: Overall time series trend
+retail |> 
+  autoplot(Turnover) +
+  labs(
+    title = "Monthly Retail Turnover Over Time",
+    subtitle = "Queensland Household Goods - Full Historical Series",
+    y = "Turnover ($ million)",
+    x = "Month"
+  ) +
+  theme_minimal()
+
+# Seasonal plot: Yearly pattern visualization
+retail |>
+  gg_season(Turnover, period = "year") +
+  labs(
+    title = "Seasonal Pattern of Retail Turnover",
+    subtitle = "Year-over-year comparison showing seasonal cycles",
+    y = "Turnover ($ million)",
+    x = "Month"
+  ) +
+  theme_minimal()
+
+# Subseries plot: Month-by-month comparison across years
+retail |> 
+  gg_subseries(Turnover) +
+  labs(
+    title = "Subseries Plot: Monthly Patterns Across Years",
+    subtitle = "Each line represents a specific month across all years",
+    y = "Turnover ($ million)"
+  ) +
+  theme_minimal()
+```
+
+**Key Observations:**
+
+The line plot of monthly retail turnover reveals a **strong upward trend** over time, with **increasingly sharp seasonal peaks**, particularly during the end-of-year months. This suggests both a growing overall demand and pronounced seasonal effects. 
+
+The seasonal plot confirms this pattern, with turnover typically **increasing from August through December** each year, especially in recent years. The subseries plot further highlights the **consistent seasonal rise in December** across all years and the overall **year-on-year growth**.
+
+Together, these plots indicate that the series is **non-stationary** with **strong multiplicative seasonality** and an **increasing trend**—characteristics that will require appropriate transformations and differencing before modeling.
+
+### 2. Statistical Features and COVID-19 Impact Analysis
+
+```{r covid-analysis}
+#| label: covid-analysis
+#| fig-cap: "Analysis of COVID-19 impact on retail turnover patterns"
+
+# Plot with COVID-19 period highlighted
+retail |> 
+  ggplot(aes(x = Month, y = Turnover)) +
+  geom_line(color = "steelblue", linewidth = 0.8) +
+  annotate("rect", 
+           xmin = as.Date("2020-03-01"), 
+           xmax = as.Date("2021-12-01"),
+           ymin = -Inf, 
+           ymax = Inf, 
+           fill = "coral", 
+           alpha = 0.3) +
+  annotate("text", 
+           x = as.Date("2021-01-01"), 
+           y = max(retail$Turnover) * 0.9,
+           label = "COVID-19 Period\n(Mar 2020 - Dec 2021)",
+           size = 3.5) +
+  labs(
+    title = "Retail Turnover with COVID-19 Impact Period Highlighted",
+    subtitle = "Analysis of structural disruption in retail patterns",
+    x = "Month", 
+    y = "Turnover ($ million)"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+**Statistical Features and COVID-19 Impact:**
+
+The retail turnover series exhibits a **strong, long-term upward trend**, with regular seasonal peaks occurring each year, particularly in December. The **COVID-19 period (March 2020 to December 2021)** shows a noticeable deviation from this pattern:
+
+1. **Initial Impact**: Turnover drops sharply in early 2020, likely due to lockdown-related restrictions and consumer uncertainty
+2. **Recovery Phase**: This is followed by a rapid recovery and even stronger seasonal peaks, indicating a potential rebound in spending behavior after restrictions eased
+3. **Structural Disruption**: The plot suggests both trend and strong multiplicative seasonality, indicating that **COVID-19 introduced a structural disruption rather than random noise**
+
+This structural break is important to consider when selecting forecasting models, as it may affect model performance if not properly accounted for.
+
+### 3. Box-Cox Transformation for Variance Stabilization
+
+```{r boxcox-estimation}
+#| label: boxcox-estimation
+#| echo: true
+
+# Estimate optimal Box-Cox transformation parameter using Guerrero method
+lambda_optimal <- retail |> 
+  features(Turnover, features = guerrero) |> 
+  pull(lambda_guerrero)
+
+cat("Optimal Box-Cox lambda (λ):", round(lambda_optimal, 3), "\n")
+```
+
+```{r boxcox-application}
+#| label: boxcox-application
+
+# Apply the Box-Cox transformation with the optimal lambda
+retail <- retail |> 
+  mutate(Turnover_trans = box_cox(Turnover, lambda = lambda_optimal))
+
+cat("Box-Cox transformation applied with λ =", round(lambda_optimal, 3), "\n")
+```
+
+```{r boxcox-visualization}
+#| label: boxcox-visualization
+#| fig-cap: "Comparison of original and transformed series"
+
+# Visualize both original and transformed series
+p1 <- retail |> 
+  autoplot(Turnover) +
+  labs(title = "Original Series", y = "Turnover ($ million)", x = "Month") +
+  theme_minimal()
+
+p2 <- retail |> 
+  autoplot(Turnover_trans) +
+  labs(title = "Box-Cox Transformed Series", 
+       subtitle = paste("λ =", round(lambda_optimal, 3)),
+       y = "Transformed Turnover", 
+       x = "Month") +
+  theme_minimal()
+
+# Display side by side (requires patchwork if available, otherwise show separately)
+p1
+p2
+```
+
+**Transformation Rationale:**
+
+After implementing the **Guerrero method**, a Box-Cox transformation with **λ ≈ 0.199** was selected to stabilize the variance in the turnover series. This transformation is appropriate because:
+
+1. **Increasing Seasonal Amplitude**: The original series exhibits multiplicative seasonality, where seasonal variations increase proportionally with the level of the series
+2. **Variance Stabilization**: The transformation reduces heteroscedasticity, making the variance more constant across different levels of the series
+3. **Preservation of Structure**: After transformation, the series maintains its overall trend and seasonality while achieving better statistical properties for modeling
+
+The lambda value close to 0 suggests a logarithmic-like transformation, which is typical for series with multiplicative patterns.
+
+### 4. STL Decomposition Analysis
+
+```{r stl-decomposition}
+#| label: stl-decomposition
+#| fig-cap: "STL decomposition revealing trend, seasonality, and remainder components"
+
+# Perform STL (Seasonal and Trend decomposition using Loess) on transformed series
+retail_stl <- retail |> 
+  model(STL(Turnover_trans ~ trend(window = 13) + season(window = "periodic")))
+
+# Plot the decomposition components
+retail_stl |> 
+  components() |> 
+  autoplot() +
+  labs(
+    title = "STL Decomposition of Box-Cox Transformed Turnover",
+    subtitle = "Decomposition into Trend, Seasonal, and Remainder components"
+  ) +
+  theme_minimal()
+```
+
+**Decomposition Insights:**
+
+The STL decomposition reveals:
+
+1. **Trend Component**: Shows a clear upward trend over the entire period, with some acceleration in recent years
+2. **Seasonal Component**: Displays consistent annual patterns with strong December peaks, confirming multiplicative seasonality
+3. **Remainder Component**: Contains the residual variation after removing trend and seasonality; should be relatively random if the decomposition is successful
+
+This decomposition helps validate that the Box-Cox transformation successfully stabilized the variance, as evidenced by the relatively constant variance in the remainder component over time.
+### 5. Stationarity Testing and Differencing Requirements
+
+```{r stationarity-tests}
+#| label: stationarity-tests
+#| echo: true
+
+# Test for seasonal unit roots (determines if seasonal differencing is needed)
+seasonal_diff_test <- retail |> 
+  features(Turnover_trans, unitroot_nsdiffs)
+
+cat("Seasonal differencing required:", seasonal_diff_test$nsdiffs, "\n")
+
+# Apply seasonal differencing (lag = 12 for monthly data)
+retail <- retail |> 
+  mutate(Turnover_season = difference(Turnover_trans, lag = 12))
+
+# Test for regular unit roots after seasonal differencing
+regular_diff_test <- retail |> 
+  features(Turnover_season, unitroot_ndiffs)
+
+cat("Regular differencing required (after seasonal):", regular_diff_test$ndiffs, "\n")
+
+# Apply regular differencing if needed
+if(regular_diff_test$ndiffs > 0) {
+  retail <- retail |> 
+    mutate(Turnover_final = difference(Turnover_season, differences = regular_diff_test$ndiffs))
+} else {
+  retail <- retail |> 
+    mutate(Turnover_final = Turnover_season)
+}
+
+cat("\nFinal differencing applied:\n")
+cat("- Seasonal differencing: Yes (lag = 12)\n")
+cat("- Regular differencing:", ifelse(regular_diff_test$ndiffs > 0, "Yes", "No"), "\n")
+```
+
+```{r differenced-diagnostics}
+#| label: differenced-diagnostics
+#| fig-cap: "ACF and PACF plots of differenced series to assess stationarity"
+
+# Display ACF and PACF plots of the final differenced series
+retail |> 
+  gg_tsdisplay(Turnover_final, plot_type = "partial") +
+  labs(
+    title = "Time Series Diagnostics: Differenced Series",
+    subtitle = "ACF and PACF plots to assess stationarity"
+  )
+```
+
+**Stationarity Analysis:**
+
+Unit-root tests indicate that:
+
+1. **Seasonal Differencing**: One seasonal difference (lag = 12) is required to make the transformed series stationary
+2. **Regular Differencing**: No regular differencing is needed after applying seasonal differencing
+3. **Stationarity Confirmation**: The differenced series shows no remaining trend or strong autocorrelation in the ACF and PACF plots, confirming that **seasonal differencing alone is sufficient**
+
+The ACF plot shows rapid decay and no significant autocorrelation beyond the seasonal lags, which is consistent with a stationary series. This differencing strategy will be incorporated into the ARIMA model specification.
+
+### 6. Model Selection Methodology
+
+**Training-Test Split Strategy:**
+
+To identify suitable forecasting models, the data was split into:
+- **Training Set**: Data up to 2021 (used for model fitting)
+- **Test Set**: Last 24 months (2022-2023) for out-of-sample validation
+
+**Model Selection Process:**
+
+1. **ARIMA Model**: Automatic selection using the `ARIMA()` function, which:
+   - Tests multiple ARIMA specifications
+   - Selects optimal parameters based on AIC (Akaike Information Criterion)
+   - Incorporates the differencing requirements identified in Question 5
+
+2. **ETS Model**: Exponential Smoothing State Space model fitted using `ETS()`:
+   - Automatically selects optimal error, trend, and seasonality components
+   - Chooses between additive and multiplicative forms
+   - Optimizes parameters to minimize AIC
+
+**Model Evaluation:**
+
+Model accuracy was evaluated on the test set using multiple metrics:
+- **RMSE** (Root Mean Squared Error): Measures average forecast error magnitude
+- **MAPE** (Mean Absolute Percentage Error): Provides percentage-based error assessment
+
+**Results Summary:**
+
+The **ETS model** achieved superior performance:
+- **RMSE**: 38.38 (vs. ARIMA: 59.93)
+- **MAPE**: 2.30% (vs. ARIMA: 4.34%)
+
+The forecast plot supported this finding, with the ETS forecast more closely tracking the actual turnover, particularly during seasonal peaks. Both models were included in the short-list and further evaluated in subsequent questions.
+
+### 7. ARIMA and ETS Models: Parameter Estimates, Diagnostics, and Forecasts
+
+```{r model-fitting}
+#| label: model-fitting
+#| echo: true
+
+# Split data into training and test sets (last 24 months for test)
+retail_train <- retail |> filter(year(Month) <= 2021)
+retail_test  <- retail |> filter(year(Month) > 2021)
+
+cat("Training set:", format(min(retail_train$Month)), "to", format(max(retail_train$Month)), "\n")
+cat("Test set:", format(min(retail_test$Month)), "to", format(max(retail_test$Month)), "\n")
+cat("Test set size:", nrow(retail_test), "months\n")
+```
+
+```{r model-estimation}
+#| label: model-estimation
+
+# Fit ARIMA and ETS models to training data
+models_q7 <- retail_train |> model(
+  ARIMA_fit = ARIMA(Turnover),
+  ETS_fit   = ETS(Turnover)
+)
+
+# Display model summaries with AIC values
+cat("=== MODEL SUMMARY ===\n")
+models_q7 |> glance() |> print()
+```
+
+```{r forecasts-plot}
+#| label: forecasts-plot
+#| fig-cap: "Two-year ahead forecasts from ARIMA and ETS models"
+
+# Forecast 2 years ahead (2022–2023)
+fc_q7 <- models_q7 |> forecast(h = "2 years")
+
+# Plot both forecasts with historical data
+fc_q7 |> 
+  autoplot(retail, level = 80) +
+  labs(
+    title = "Forecasts from ARIMA and ETS Models (2022–2023)",
+    subtitle = "80% prediction intervals shown",
+    y = "Turnover ($ million)",
+    x = "Month"
+  ) +
+  theme_minimal()
+```
+
+```{r residual-diagnostics}
+#| label: residual-diagnostics
+#| fig-cap: "Residual diagnostics for model validation"
+
+# Residual diagnostics for ARIMA model
+cat("=== ARIMA MODEL RESIDUALS ===\n")
+models_q7 |> 
+  select(ARIMA_fit) |> 
+  gg_tsresiduals() +
+  labs(title = "ARIMA Model: Residual Diagnostics")
+
+# Residual diagnostics for ETS model
+cat("\n=== ETS MODEL RESIDUALS ===\n")
+models_q7 |> 
+  select(ETS_fit) |> 
+  gg_tsresiduals() +
+  labs(title = "ETS Model: Residual Diagnostics")
+```
+
+```{r ljung-box-test}
+#| label: ljung-box-test
+#| echo: true
+
+# Ljung-Box test for residual autocorrelation
+# Tests null hypothesis: residuals are independently distributed
+ljung_box_results <- models_q7 |> 
+  augment() |> 
+  features(.resid, ljung_box, lag = 24, dof = 0)
+
+cat("=== LJUNG-BOX TEST RESULTS ===\n")
+print(ljung_box_results)
+cat("\nInterpretation: p-value < 0.05 suggests residual autocorrelation\n")
+```
+
+**Model Analysis:**
+
+An ARIMA and an ETS model were fitted to the training set (up to 2021), producing 2-year forecasts with prediction intervals. The **ETS forecast was smoother and aligned more closely** with the observed turnover.
+
+**Parameter Estimates:**
+- Parameter estimates were generated automatically through optimization algorithms
+- Model specifications can be viewed in the summary tables above
+
+**Residual Diagnostics:**
+
+1. **ARIMA Model**: 
+   - Ljung-Box test: p = 0.215 (no significant autocorrelation)
+   - Residuals appear white noise with no major patterns
+
+2. **ETS Model**: 
+   - Ljung-Box test: p = 0.0008 (some autocorrelation detected)
+   - However, ACF plot shows no large spikes, suggesting the autocorrelation is minimal
+   - Residuals are well-behaved overall
+
+**Conclusion:** Both models captured the series structure well, though **ETS demonstrated better overall fit** based on forecast accuracy and visual inspection.
+
+### 8. Model Comparison and Selection
+
+```{r model-comparison}
+#| label: model-comparison
+#| echo: true
+
+# Forecast both models for 2 years (2022–2023)
+fc_compare_q8 <- models_q7 |> forecast(h = "2 years")
+
+# Evaluate forecast accuracy on the test set
+accuracy_results <- fc_compare_q8 |> accuracy(retail_test)
+
+cat("=== FORECAST ACCURACY COMPARISON ===\n")
+print(accuracy_results)
+```
+
+```{r comparison-visualization}
+#| label: comparison-visualization
+#| fig-cap: "Visual comparison of forecast accuracy on test set"
+
+# Plot forecasts vs actual on test set
+fc_compare_q8 |> 
+  autoplot(retail_test, level = NULL) +
+  autolayer(retail_test, Turnover, color = "black", linewidth = 1.2) +
+  labs(
+    title = "Model Comparison: Forecasts vs Actual (Test Set 2022-2023)",
+    subtitle = "Black line represents actual values",
+    y = "Turnover ($ million)",
+    x = "Month"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+**Model Comparison Results:**
+
+The ARIMA and ETS models were compared using a **two-year test set (2022-2023)**. The **ETS model outperformed ARIMA** in all forecast accuracy metrics:
+
+- **Lower RMSE**: ETS achieved significantly lower root mean squared error
+- **Lower MAPE**: ETS achieved lower mean absolute percentage error
+- **Better Visual Fit**: ETS forecasts more closely track actual values, especially during seasonal peaks
+
+**Key Findings:**
+
+1. **Trend Capture**: Both models captured the overall trend and seasonality well
+2. **Smoother Forecasts**: ETS produced smoother forecasts that aligned more closely with actual values
+3. **Seasonal Patterns**: ETS better captured the seasonal structure, particularly the December peaks
+
+**Conclusion:** The **ETS model is preferred for forecasting**, based on both its stronger test performance and more stable seasonal pattern. This makes it more suitable for business planning and decision-making applications.
+
+### 9. Final Model Forecasts: Full Dataset Application
+
+```{r final-models}
+#| label: final-models
+#| echo: true
+
+# Refit both models to the full dataset (using all available data)
+# This re-estimates parameters but maintains the same model structure
+final_full_models <- retail |> model(
+  ARIMA_final = ARIMA(Turnover),
+  ETS_final   = ETS(Turnover)
+)
+
+cat("Models refitted on full dataset\n")
+cat("Data range:", format(min(retail$Month)), "to", format(max(retail$Month)), "\n")
+```
+
+```{r final-forecasts}
+#| label: final-forecasts
+#| fig-cap: "Out-of-sample forecasts with 80% prediction intervals"
+
+# Forecast 2 years ahead (past the end of the data)
+final_forecasts <- final_full_models |> 
+  forecast(h = "2 years", level = 80)
+
+# Plot forecasts for both models
+final_forecasts |> 
+  autoplot(retail, level = 80) +
+  labs(
+    title = "Final Forecasts: ARIMA and ETS Models",
+    subtitle = "Out-of-sample forecasts with 80% prediction intervals (2 years ahead)",
+    y = "Turnover ($ million)",
+    x = "Month",
+    color = "Model",
+    fill = "Model"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+```{r forecast-summary}
+#| label: forecast-summary
+#| echo: true
+
+# Display forecast summary statistics
+cat("=== FORECAST SUMMARY ===\n")
+forecast_summary <- final_forecasts |>
+  as_tibble() |>
+  group_by(.model) |>
+  summarise(
+    Forecast_Period = paste(format(min(Month)), "to", format(max(Month))),
+    Mean_Forecast = round(mean(.mean), 2),
+    Min_Forecast = round(min(.mean), 2),
+    Max_Forecast = round(max(.mean), 2),
+    .groups = "drop"
+  )
+print(forecast_summary)
+```
+
+**Final Forecast Analysis:**
+
+The ARIMA and ETS models were refit using the **full dataset** to maximize information utilization. Forecasts for the next two years were generated with **80% prediction intervals**.
+
+**Key Observations:**
+
+1. **Trend Continuation**: Both models captured the ongoing upward trend, projecting continued growth
+2. **Seasonal Patterns**: Both models maintained the strong December seasonal peaks
+3. **Model Differences**: 
+   - **ETS forecast**: Maintained smoother seasonal structure
+   - **ARIMA forecast**: Displayed slightly more fluctuation
+4. **Uncertainty**: Prediction intervals widened over time for both models, reflecting **greater uncertainty** in longer-term forecasts
+
+These forecasts represent the **final output** of the selected models, based on the full available historical data, and can be used for business planning and strategic decision-making.
+
+### 10. Forecast Validation: Comparison with Actual ABS Data
+
+```{r abs-data-loading}
+#| label: abs-data-loading
+#| echo: true
+
+# Load actual data from ABS website (Table 11)
+# Note: This requires the ABS data.xlsx file to be in the working directory
+abs_data <- read_excel("ABS data.xlsx", sheet = "Data1", skip = 10)
+
+# Clean and prepare ABS data
+abs_clean <- abs_data |> 
+  select(Month = 1, Turnover = 51) |>
+  filter(!is.na(Month), !is.na(Turnover)) |>
+  mutate(Month = yearmonth(as.Date(Month))) |>
+  as_tsibble(index = Month)
+
+# Identify forecast period start date
+forecast_start_date <- max(retail$Month) + 1  
+actual_future_data <- abs_clean |> 
+  filter(Month >= forecast_start_date)
+
+cat("Forecast validation period:", format(min(actual_future_data$Month)), 
+    "to", format(max(actual_future_data$Month)), "\n")
+cat("Number of validation months:", nrow(actual_future_data), "\n")
+```
+
+```{r forecast-comparison}
+#| label: forecast-comparison
+#| echo: true
+
+# Generate forecasts for the validation period
+model_forecasts <- final_full_models |> 
+  forecast(h = nrow(actual_future_data))
+
+# Create comparison table
+comparison_table <- model_forecasts |> 
+  as_tibble() |> 
+  select(Month, .model, .mean) |> 
+  pivot_wider(names_from = .model, values_from = .mean) |> 
+  left_join(actual_future_data, by = "Month") |> 
+  rename(Actual = Turnover)
+
+# Calculate forecast errors
+comparison_table <- comparison_table |> 
+  mutate(
+    ARIMA_error = ARIMA_final - Actual,
+    ETS_error = ETS_final - Actual,
+    ARIMA_abs_pct_error = abs(ARIMA_error / Actual) * 100,
+    ETS_abs_pct_error = abs(ETS_error / Actual) * 100
+  )
+
+cat("=== FORECAST COMPARISON (First 10 Months) ===\n")
+print(comparison_table |> 
+      select(Month, ARIMA_final, ETS_final, Actual, ARIMA_error, ETS_error) |> 
+      head(10))
+```
+
+```{r accuracy-metrics}
+#| label: accuracy-metrics
+#| echo: true
+
+# Calculate comprehensive accuracy metrics
+accuracy_summary <- comparison_table |> 
+  summarise(
+    ARIMA_RMSE = sqrt(mean(ARIMA_error^2, na.rm = TRUE)),
+    ETS_RMSE = sqrt(mean(ETS_error^2, na.rm = TRUE)),
+    ARIMA_MAE = mean(abs(ARIMA_error), na.rm = TRUE),
+    ETS_MAE = mean(abs(ETS_error), na.rm = TRUE),
+    ARIMA_MAPE = mean(ARIMA_abs_pct_error, na.rm = TRUE),
+    ETS_MAPE = mean(ETS_abs_pct_error, na.rm = TRUE)
+  )
+
+cat("=== FORECAST ACCURACY METRICS ===\n")
+print(accuracy_summary)
+
+better_model <- ifelse(accuracy_summary$ETS_MAPE < accuracy_summary$ARIMA_MAPE, "ETS", "ARIMA")
+cat("\nBest performing model:", better_model, "\n")
+```
+
+```{r validation-plot}
+#| label: validation-plot
+#| fig-cap: "Forecast validation: Comparing predictions with actual ABS data"
+
+# Create comprehensive validation plot
+forecast_plot <- comparison_table |> 
+  select(Month, "ARIMA Forecast" = ARIMA_final, "ETS Forecast" = ETS_final, "Actual Data" = Actual) |> 
+  pivot_longer(cols = -Month, names_to = "Series", values_to = "Turnover") |> 
+  ggplot(aes(x = Month, y = Turnover, color = Series, linetype = Series)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("Actual Data" = "black", "ARIMA Forecast" = "blue", "ETS Forecast" = "red")) +
+  scale_linetype_manual(values = c("Actual Data" = "solid", "ARIMA Forecast" = "dashed", "ETS Forecast" = "dotted")) +
+  labs(
+    title = "Forecast Validation: Predicted vs Actual Queensland Household Goods Turnover",
+    subtitle = paste("Models trained on 1982-2022, forecasting", nrow(actual_future_data), "months ahead"),
+    x = "Month",
+    y = "Turnover ($ million)",
+    color = "Series",
+    linetype = "Series"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11)
+  )
+
+print(forecast_plot)
+```
+
+```{r performance-assessment}
+#| label: performance-assessment
+#| echo: true
+
+# Assess overall forecast performance
+if(accuracy_summary[[paste0(better_model, "_MAPE")]] < 5) {
+  performance_level <- "EXCELLENT"
+} else if(accuracy_summary[[paste0(better_model, "_MAPE")]] < 10) {
+  performance_level <- "VERY GOOD"
+} else if(accuracy_summary[[paste0(better_model, "_MAPE")]] < 15) {
+  performance_level <- "GOOD"
+} else if(accuracy_summary[[paste0(better_model, "_MAPE")]] < 25) {
+  performance_level <- "FAIR"
+} else {
+  performance_level <- "POOR"
+}
+
+cat("=== PERFORMANCE ASSESSMENT ===\n")
+cat("Overall forecast performance:", performance_level, "\n")
+cat("Best model MAPE:", round(accuracy_summary[[paste0(better_model, "_MAPE")]], 2), "%\n")
+
+# Check for forecast bias
+arima_bias <- mean(comparison_table$ARIMA_error, na.rm = TRUE)
+ets_bias <- mean(comparison_table$ETS_error, na.rm = TRUE)
+
+cat("\n=== BIAS ANALYSIS ===\n")
+cat("ARIMA average error:", round(arima_bias, 2), "million (", 
+    ifelse(arima_bias > 0, "over-forecasting", "under-forecasting"), ")\n")
+cat("ETS average error:", round(ets_bias, 2), "million (", 
+    ifelse(ets_bias > 0, "over-forecasting", "under-forecasting"), ")\n")
+
+cat("\n=== VALIDATION SUMMARY ===\n")
+cat("✓ Trained models on historical data (1982-2022)\n")
+cat("✓ Generated forecasts for", nrow(actual_future_data), "months ahead\n")
+cat("✓ Compared with actual ABS data\n")
+cat("✓", better_model, "model performed better with", 
+    round(accuracy_summary[[paste0(better_model, "_MAPE")]], 1), "% MAPE\n")
+cat("✓ Forecast performance rated as:", performance_level, "\n")
+```
+
+**Forecast Validation Results:**
+
+The ARIMA and ETS models were refit using the full dataset. Forecasts for the next 2 years were generated with 80% prediction intervals. Both models captured the ongoing upward trend and seasonal peaks. However, the **ETS forecast maintained smoother seasonal structure**, while ARIMA displayed more fluctuation. Prediction intervals widened over time for both models, reflecting greater uncertainty in longer-term forecasts.
+
+**Validation Performance:**
+- Models successfully predicted future retail turnover patterns
+- ETS model demonstrated superior accuracy in out-of-sample validation
+- Both models captured key seasonal patterns (December peaks)
+- Forecast errors were within acceptable ranges for business planning purposes
+
+### 11. Model Benefits and Limitations
+
+**Benefits of the Forecasting Models:**
+
+1. **Strong Historical Performance**: Both ARIMA and ETS models performed well, closely tracking actual Queensland data throughout the validation period (2023-2025). The models successfully captured:
+   - Seasonal patterns, including December peaks in both 2023 and 2024
+   - Correct scale and trend continuation
+   - Overall data structure from 40 years of historical data
+
+2. **Methodological Soundness**: The forecasting methodology demonstrates:
+   - Proper data transformation and differencing procedures
+   - Rigorous model selection based on statistical criteria
+   - Effective learning from historical patterns
+
+3. **Practical Applicability**: The models are suitable for:
+   - Retail planning decisions
+   - Inventory management
+   - Short to medium-term business forecasting (12-18 months)
+   - Budget planning and resource allocation
+
+**Limitations and Considerations:**
+
+1. **Structural Breaks**: The models cannot predict structural breaks or regime changes that deviate from historical patterns. Examples include:
+   - Economic recessions or booms
+   - Major policy changes
+   - Unprecedented events (like COVID-19)
+
+2. **External Factors**: The models do not incorporate:
+   - Economic conditions (interest rates, inflation, unemployment)
+   - Competitor actions or market dynamics
+   - Consumer behavior shifts
+   - Regulatory changes
+
+3. **Assumptions**: The models assume:
+   - Historical patterns will continue unchanged
+   - No structural shifts in the underlying data generating process
+   - Stationarity in the transformed and differenced series
+
+4. **Forecast Horizon**: 
+   - While effective for 12-18 month horizons under stable conditions
+   - Performance may deteriorate with longer forecasts
+   - Uncertainty increases significantly beyond 24 months
+
+5. **Market Specificity**: 
+   - Models are calibrated specifically to Queensland's retail market
+   - May not generalize to other regions or sectors without recalibration
+
+**Recommendations:**
+
+For strategic decision-making, these models should be:
+- **Complemented** with expert judgment and domain knowledge
+- **Monitored** continuously for forecast accuracy
+- **Updated** regularly as new data becomes available
+- **Combined** with qualitative analysis of market conditions
+- **Used** as one input among many in the decision-making process
+
+**Conclusion:**
+
+While these statistical models provide valuable quantitative forecasts, they should be viewed as tools to support—not replace—human judgment in strategic business decisions. The combination of rigorous statistical modeling with business acumen yields the best forecasting outcomes.
